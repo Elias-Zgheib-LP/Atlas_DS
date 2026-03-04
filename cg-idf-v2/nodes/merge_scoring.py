@@ -18,6 +18,7 @@ from statistics import mean
 from typing import Dict, List
 
 from cg_idf_v2.schema import (
+    AnswerType,
     AuditFlag,
     AuditState,
     FinalReport,
@@ -122,11 +123,18 @@ def _apply_verifications(state: AuditState) -> List[AuditFlag]:
 # ---------------------------------------------------------------------------
 
 def _compute_layer_rollup(layer: Layer) -> float:
-    """Mean confidence across all answered questions in a layer."""
-    answered = [q.confidence for q in layer.questions if q.llm_answer]
-    if not answered:
+    """
+    Mean confidence across all questions in a layer.
+    Questions with no answer or answer_type='unknown' contribute 0.0
+    so that missing data penalises the score rather than being silently excluded.
+    """
+    if not layer.questions:
         return 0.0
-    return round(mean(answered), 4)
+    scores = [
+        q.confidence if (q.llm_answer and q.answer_type != AnswerType.unknown) else 0.0
+        for q in layer.questions
+    ]
+    return round(mean(scores), 4)
 
 
 def _compute_overall_score(layers: Dict[str, Layer]) -> float:
