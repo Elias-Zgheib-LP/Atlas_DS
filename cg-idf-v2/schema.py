@@ -50,6 +50,7 @@ class Evidence(BaseModel):
     platform:        str           # e.g. "ios", "android", "web"
     navigation_path: str           # e.g. "Home > Feed > Post Detail"
     uri:             str           # deep-link or URL captured
+    image_path:      Optional[str] = None  # path to screenshot file (png/jpg/webp)
     # Raw description set by Provider A after image analysis
     raw_description: Optional[str] = None
 

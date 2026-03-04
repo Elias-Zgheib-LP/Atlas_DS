@@ -10,10 +10,13 @@ Responsibilities:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 import uuid
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from cg_idf_v2.llm import call_llm
 from cg_idf_v2.schema import (
@@ -127,12 +130,51 @@ Output schema:
 """
 
 
-def _build_user_message(state: AuditState) -> str:
-    """Serialize evidence and layer questions into the Provider A prompt."""
-    evidence_block = json.dumps(
-        [e.model_dump(mode="json") for e in state.evidence],
-        indent=2,
-    )
+def _load_image(image_path: str) -> Tuple[str, str]:
+    """
+    Load an image file and return (base64_data, media_type).
+    Raises FileNotFoundError if the path does not exist.
+    """
+    path = Path(image_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+    media_type, _ = mimetypes.guess_type(str(path))
+    if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
+        media_type = "image/png"  # safe default
+    data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+    return data, media_type
+
+
+def _build_user_message(state: AuditState) -> Tuple[str, List[Dict[str, str]]]:
+    """
+    Serialize evidence and layer questions into the Provider A prompt.
+
+    Returns:
+        (text_prompt, images) where images is a list of
+        {"data": base64_str, "media_type": "image/png"} dicts,
+        one per evidence item that has an image_path set.
+        Images are ordered to match the image index references in the text.
+    """
+    images: List[Dict[str, str]] = []
+    image_index_map: Dict[str, int] = {}  # evidence_id -> 1-based image index
+
+    for ev in state.evidence:
+        if ev.image_path:
+            try:
+                img_data, media_type = _load_image(ev.image_path)
+                images.append({"data": img_data, "media_type": media_type})
+                image_index_map[ev.evidence_id] = len(images)
+            except FileNotFoundError as exc:
+                logger.warning("[ProviderA] %s — skipping image.", exc)
+
+    # Build evidence metadata block (exclude binary image_path from JSON)
+    evidence_list = []
+    for ev in state.evidence:
+        ev_dict = ev.model_dump(mode="json", exclude={"image_path"})
+        if ev.evidence_id in image_index_map:
+            ev_dict["screenshot"] = f"Image {image_index_map[ev.evidence_id]} (attached above)"
+        evidence_list.append(ev_dict)
+    evidence_block = json.dumps(evidence_list, indent=2)
 
     layers_block = json.dumps(
         {
@@ -148,16 +190,25 @@ def _build_user_message(state: AuditState) -> str:
         indent=2,
     )
 
-    return f"""
+    image_note = ""
+    if image_index_map:
+        refs = "\n".join(
+            f"  - Image {idx} → evidence_id={ev_id}"
+            for ev_id, idx in image_index_map.items()
+        )
+        image_note = f"\n## Attached screenshots (analyze each visually)\n{refs}\n"
+
+    text = f"""{image_note}
 ## Evidence items (human-supplied, do not fabricate)
 {evidence_block}
 
 ## Layers and questions you must answer
 {layers_block}
 
-Analyze the evidence and return the JSON output described in the system prompt.
+Analyze the evidence (and the attached screenshots where provided) and return the JSON output described in the system prompt.
 run_id must be a new UUID you generate.
 """
+    return text, images
 
 
 def run_provider_a(state: AuditState) -> AuditState:
@@ -169,11 +220,16 @@ def run_provider_a(state: AuditState) -> AuditState:
 
     logger.info("[ProviderA] Starting analysis. run_id=%s", run_id)
 
+    user_message, images = _build_user_message(state)
+    if images:
+        logger.info("[ProviderA] Sending %d screenshot(s) to LLM.", len(images))
+
     try:
         raw_text = call_llm(
             system_prompt=PROVIDER_A_SYSTEM_PROMPT,
-            user_message=_build_user_message(state),
+            user_message=user_message,
             max_tokens=8192,
+            images=images or None,
         ).strip()
     except Exception as exc:
         logger.error("[ProviderA] LLM call failed: %s", exc)

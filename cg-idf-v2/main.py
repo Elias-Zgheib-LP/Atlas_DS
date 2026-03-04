@@ -148,6 +148,29 @@ def run_audit(
 
 
 # ---------------------------------------------------------------------------
+# Image assignment helper
+# ---------------------------------------------------------------------------
+
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+
+def _assign_images(evidence: list[Evidence], images_dir: Path) -> None:
+    """
+    For each Evidence item, look for a file named <evidence_id>.<ext> inside
+    images_dir and set image_path if found. Logs a warning for unmatched items.
+    """
+    for ev in evidence:
+        for ext in _IMAGE_EXTENSIONS:
+            candidate = images_dir / f"{ev.evidence_id}{ext}"
+            if candidate.exists():
+                ev.image_path = str(candidate)
+                logger.info("Assigned image %s → evidence_id=%s", candidate.name, ev.evidence_id)
+                break
+        else:
+            logger.warning("No image found for evidence_id=%s in %s", ev.evidence_id, images_dir)
+
+
+# ---------------------------------------------------------------------------
 # CLI entrypoint
 # ---------------------------------------------------------------------------
 
@@ -169,11 +192,25 @@ if __name__ == "__main__":
         default=None,
         help="Optional path to write the JSON report.",
     )
+    parser.add_argument(
+        "--images-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing screenshot images named <evidence_id>.<ext> "
+            "(e.g. ev_001.png). Automatically assigned to matching evidence items."
+        ),
+    )
     args = parser.parse_args()
 
     custom_evidence = None
     if args.evidence_file:
         raw = json.loads(args.evidence_file.read_text())
         custom_evidence = [Evidence.model_validate(e) for e in raw]
+
+    if args.images_dir:
+        evidence_list = custom_evidence or SAMPLE_EVIDENCE
+        _assign_images(evidence_list, args.images_dir)
+        custom_evidence = evidence_list
 
     run_audit(evidence=custom_evidence, output_path=args.output)
